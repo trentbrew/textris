@@ -2,9 +2,9 @@
 
 A terminal-based Tetris clone written in Rust using [ratatui](https://github.com/ratatui-org/ratatui).
 
-![Textris Demo](https://github.com/trentbrew/textris/raw/main/demo.gif)
+<img width="1930" height="2458" alt="CleanShot 2026-01-07 at 09 38 56@2x" src="https://github.com/user-attachments/assets/bb75a2f1-883a-4b2d-8c4d-8d079add1b0b" />
 
-## Features
+## Overview
 
 -   **Classic Tetris Gameplay**: Complete with 7 tetromino shapes, rotation, and line clearing.
 -   **Modern Mechanics**:
