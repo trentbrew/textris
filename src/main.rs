@@ -1,5 +1,3 @@
-use std::io;
-use std::time::Duration;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -7,19 +5,22 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, BorderType, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 use rodio::{source::Source, OutputStream, Sink};
+use std::io;
+use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq)]
 enum GameEvent {
     Move,
     Rotate,
     Lock,
-    Clear(u32), // lines cleared
+    Clear(u32, u32), // (lines cleared, combo count)
     GameOver,
     Hold,
     LevelUp,
+    FinesseFault(u8), // 1=double rotation, 2=inefficient move
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -178,6 +179,9 @@ struct Game {
     combo: u32,
     lock_delay_start: Option<std::time::Instant>,
     events: Vec<GameEvent>,
+    last_rotation_was_cw: Option<bool>, // Track rotation direction for finesse
+    consecutive_rotations: u32,         // Count consecutive rotations
+    finesse_faults: u32,                // Count of finesse violations
 }
 
 struct SoundSystem {
@@ -188,59 +192,93 @@ struct SoundSystem {
 impl SoundSystem {
     fn new() -> Option<Self> {
         let (_stream, stream_handle) = OutputStream::try_default().ok()?;
-        Some(Self { _stream, stream_handle })
+        Some(Self {
+            _stream,
+            stream_handle,
+        })
     }
 
     fn play(&self, event: GameEvent) {
         if let Ok(sink) = Sink::try_new(&self.stream_handle) {
             match event {
-                GameEvent::Move => {
-                    let source = rodio::source::SineWave::new(400.0)
-                        .take_duration(Duration::from_millis(20))
-                        .amplify(0.10);
-                    sink.append(source);
-                }
-                GameEvent::Rotate => {
-                    let source = rodio::source::SineWave::new(600.0)
-                        .take_duration(Duration::from_millis(40))
-                        .amplify(0.10);
+                GameEvent::Move | GameEvent::Rotate => {
+                    // Subtle neutral click - C4
+                    let source = rodio::source::SineWave::new(261.63)
+                        .take_duration(Duration::from_millis(8))
+                        .amplify(0.03);
                     sink.append(source);
                 }
                 GameEvent::Lock => {
-                    let source = rodio::source::SineWave::new(200.0)
-                        .take_duration(Duration::from_millis(100))
-                        .amplify(0.30);
+                    // Gentle thud - Low C2
+                    let source = rodio::source::SineWave::new(65.41)
+                        .take_duration(Duration::from_millis(60))
+                        .amplify(0.12);
                     sink.append(source);
                 }
-                GameEvent::Clear(lines) => {
-                    let base_freq = 800.0;
-                    let freq = base_freq + (lines as f32 * 200.0);
-                    let source = rodio::source::SineWave::new(freq)
-                        .take_duration(Duration::from_millis(200))
-                        .amplify(0.20);
-                    sink.append(source);
+                GameEvent::Clear(lines, combo) => {
+                    // Simple ascending pitch based on combo count
+                    // Base two-note chime pattern, pitched up for each combo level
+
+                    // Base frequencies for the two-note chime (C5 → E5)
+                    let base_note1 = 523.25; // C5
+                    let base_note2 = 659.25; // E5
+
+                    // Pitch multiplier increases by 10% for each combo level
+                    let pitch_multiplier = 1.0 + ((combo.saturating_sub(1)) as f32 * 0.10);
+
+                    let note1 = base_note1 * pitch_multiplier;
+                    let note2 = base_note2 * pitch_multiplier;
+
+                    // Play the two-note chime
+                    let source1 = rodio::source::SineWave::new(note1)
+                        .take_duration(Duration::from_millis(80))
+                        .amplify(0.18);
+                    sink.append(source1);
+
+                    let source2 = rodio::source::SineWave::new(note2)
+                        .take_duration(Duration::from_millis(150))
+                        .amplify(0.18);
+                    sink.append(source2);
+
+                    // For Tetris (4 lines), add an extra celebratory note
+                    if lines == 4 {
+                        let source3 = rodio::source::SineWave::new(note2 * 1.5)
+                            .take_duration(Duration::from_millis(100))
+                            .amplify(0.20);
+                        sink.append(source3);
+                    }
                 }
                 GameEvent::Hold => {
-                    let source = rodio::source::SineWave::new(500.0)
-                        .take_duration(Duration::from_millis(50))
-                        .amplify(0.10);
+                    // Soft swap sound - A4
+                    let source = rodio::source::SineWave::new(440.0)
+                        .take_duration(Duration::from_millis(30))
+                        .amplify(0.06);
                     sink.append(source);
                 }
                 GameEvent::GameOver => {
-                    let source = rodio::source::SineWave::new(100.0)
+                    // Descending minor chord
+                    let source = rodio::source::SineWave::new(130.81)
                         .take_duration(Duration::from_millis(1000))
                         .amplify(0.30);
                     sink.append(source);
                 }
                 GameEvent::LevelUp => {
-                    let source = rodio::source::SineWave::new(880.0)
-                        .take_duration(Duration::from_millis(150))
-                        .amplify(0.20);
+                    // Rising C major arpeggio - C5 to C6
+                    let source = rodio::source::SineWave::new(523.25)
+                        .take_duration(Duration::from_millis(100))
+                        .amplify(0.18);
                     sink.append(source);
-                    let source2 = rodio::source::SineWave::new(1760.0)
-                        .take_duration(Duration::from_millis(300))
-                        .amplify(0.20);
+                    let source2 = rodio::source::SineWave::new(659.25)
+                        .take_duration(Duration::from_millis(100))
+                        .amplify(0.18);
                     sink.append(source2);
+                    let source3 = rodio::source::SineWave::new(783.99)
+                        .take_duration(Duration::from_millis(200))
+                        .amplify(0.18);
+                    sink.append(source3);
+                }
+                GameEvent::FinesseFault(_) => {
+                    // Silent - no sound for finesse faults
                 }
             }
             sink.detach();
@@ -267,12 +305,22 @@ impl Game {
             combo: 0,
             lock_delay_start: None,
             events: Vec::new(),
+            last_rotation_was_cw: None,
+            consecutive_rotations: 0,
+            finesse_faults: 0,
         }
     }
 
     fn random_piece() -> Tetromino {
-        let pieces = [Tetromino::i(), Tetromino::o(), Tetromino::t(),
-                      Tetromino::s(), Tetromino::z(), Tetromino::l(), Tetromino::j()];
+        let pieces = [
+            Tetromino::i(),
+            Tetromino::o(),
+            Tetromino::t(),
+            Tetromino::s(),
+            Tetromino::z(),
+            Tetromino::l(),
+            Tetromino::j(),
+        ];
         pieces[fastrand::usize(0..7)]
     }
 
@@ -320,7 +368,8 @@ impl Game {
         if lines_cleared > 0 {
             self.lines += lines_cleared;
             self.combo += 1;
-            self.events.push(GameEvent::Clear(lines_cleared));
+            self.events
+                .push(GameEvent::Clear(lines_cleared, self.combo));
 
             // Score calculation with combo bonus
             let base_score = match lines_cleared {
@@ -331,7 +380,11 @@ impl Game {
                 _ => 0,
             };
 
-            let combo_bonus = if self.combo > 1 { (self.combo - 1) * 50 * self.level } else { 0 };
+            let combo_bonus = if self.combo > 1 {
+                (self.combo - 1) * 50 * self.level
+            } else {
+                0
+            };
             self.score += (base_score * self.level) + combo_bonus;
 
             let old_level = self.level;
@@ -351,6 +404,9 @@ impl Game {
         self.current.y = 0;
         self.next = Self::random_piece();
         self.can_hold = true;
+        // Reset rotation tracking for new piece
+        self.last_rotation_was_cw = None;
+        self.consecutive_rotations = 0;
 
         if self.collision(&self.current) {
             self.game_over = true;
@@ -380,6 +436,25 @@ impl Game {
             return;
         }
 
+        // Check for double rotation (finesse fault for S/Z pieces)
+        if let Some(last_cw) = self.last_rotation_was_cw {
+            if last_cw == clockwise && self.consecutive_rotations > 0 {
+                self.consecutive_rotations += 1;
+                // For S/Z pieces, double rotation in same direction is inefficient
+                if self.consecutive_rotations >= 2 {
+                    if self.current.color == Color::Green || self.current.color == Color::Red {
+                        self.events.push(GameEvent::FinesseFault(1));
+                        self.finesse_faults += 1;
+                    }
+                }
+            } else {
+                self.consecutive_rotations = 1;
+            }
+        } else {
+            self.consecutive_rotations = 1;
+        }
+        self.last_rotation_was_cw = Some(clockwise);
+
         let rotated = if clockwise {
             self.current.rotate()
         } else {
@@ -387,10 +462,27 @@ impl Game {
             self.current.rotate().rotate().rotate()
         };
 
+        // Try basic rotation first
         if !self.collision(&rotated) {
             self.current = rotated;
-            self.lock_delay_start = None; // Reset lock delay on rotation
+            self.lock_delay_start = None;
             self.events.push(GameEvent::Rotate);
+            return;
+        }
+
+        // Wall kick: try offset positions
+        // Test offsets in order: 0 (already tried), -1, +1, -2, +2
+        let offsets = [0, -1, 1, -2, 2];
+        for offset in offsets {
+            let mut kicked = rotated;
+            kicked.x += offset;
+
+            if !self.collision(&kicked) {
+                self.current = kicked;
+                self.lock_delay_start = None;
+                self.events.push(GameEvent::Rotate);
+                return;
+            }
         }
     }
 
@@ -462,10 +554,10 @@ fn main() -> io::Result<()> {
 
     // Determine board size based on terminal height
     // Reserve space for header (3) and footer (2) and some padding
-    let terminal_height = terminal.size()?.height;
+    let terminal_height = terminal.size()?.height - 1;
     let board_height = (terminal_height as usize).saturating_sub(6).max(20);
     // Keep standard width for gameplay balance, but could be adjusted
-    let board_width = 10;
+    let board_width = 11;
 
     let mut game = Game::new(board_width, board_height);
     let mut last_tick = std::time::Instant::now();
@@ -503,7 +595,10 @@ fn main() -> io::Result<()> {
             } else if game.paused {
                 Span::styled("PAUSED ", Style::default().fg(Color::Yellow).bold())
             } else if game.combo > 1 {
-                Span::styled(format!("COMBO x{}! ", game.combo), Style::default().fg(Color::LightRed).bold())
+                Span::styled(
+                    format!("COMBO x{}! ", game.combo),
+                    Style::default().fg(Color::LightRed).bold(),
+                )
             } else {
                 Span::styled("", Style::default())
             };
@@ -513,13 +608,22 @@ fn main() -> io::Result<()> {
                 Span::styled("Tetris", Style::default().fg(Color::Cyan).bold()),
                 Span::raw("  │  "),
                 Span::styled("Score: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(game.score.to_string(), Style::default().fg(Color::Yellow).bold()),
+                Span::styled(
+                    game.score.to_string(),
+                    Style::default().fg(Color::Yellow).bold(),
+                ),
                 Span::raw("  │  "),
                 Span::styled("Lines: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(game.lines.to_string(), Style::default().fg(Color::Green)),
                 Span::raw("  │  "),
                 Span::styled("Level: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(game.level.to_string(), Style::default().fg(Color::Magenta)),
+                Span::raw("  │  "),
+                Span::styled("Faults: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    game.finesse_faults.to_string(),
+                    Style::default().fg(Color::LightRed),
+                ),
             ])])
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::BOTTOM));
@@ -546,13 +650,19 @@ fn main() -> io::Result<()> {
                     let cell = game.board[y][x];
 
                     // Check if current piece occupies this cell
-                    let piece_here = game.current.cells().iter().any(|(px, py)| {
-                        *px == x as i32 && *py == y as i32
-                    });
+                    let piece_here = game
+                        .current
+                        .cells()
+                        .iter()
+                        .any(|(px, py)| *px == x as i32 && *py == y as i32);
 
                     // Check if ghost piece occupies this cell (at drop position)
                     let ghost_here = game.current.cells().iter().any(|(px, py)| {
-                        *px == x as i32 && (*py + ghost_y_offset) == y as i32
+                        let ghost_y = *py + ghost_y_offset;
+                        *px == x as i32
+                            && ghost_y == y as i32
+                            && ghost_y >= 0
+                            && ghost_y < game.height as i32
                     });
 
                     let (ch, color, style) = if piece_here {
@@ -570,24 +680,19 @@ fn main() -> io::Result<()> {
                 board_lines.push(Line::from(spans));
             }
 
-            let board = Paragraph::new(board_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Thick)
-                        .border_style(Style::default().fg(Color::White))
-                        .title(format!(" Board ({}x{}) ", game.width, game.height)),
-                )
-                .alignment(Alignment::Center);
+            let board = Paragraph::new(board_lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Thick)
+                    .border_style(Style::default().fg(Color::White))
+                    .title(format!(" Board ({}x{}) ", game.width, game.height)),
+            );
             frame.render_widget(board, game_chunks[1]);
 
             // Side panel with next and hold
             let side_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(10),
-                    Constraint::Length(10),
-                ])
+                .constraints([Constraint::Length(10), Constraint::Length(10)])
                 .split(game_chunks[2]);
 
             // Next piece preview
@@ -605,14 +710,13 @@ fn main() -> io::Result<()> {
                 next_lines.push(Line::from(spans));
             }
 
-            let next_panel = Paragraph::new(next_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(Color::Yellow))
-                        .title(" Next "),
-                );
+            let next_panel = Paragraph::new(next_lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(" Next "),
+            );
             frame.render_widget(next_panel, side_chunks[0]);
 
             // Hold piece preview
@@ -634,14 +738,13 @@ fn main() -> io::Result<()> {
                 hold_lines.push(Line::from("   Empty"));
             }
 
-            let hold_panel = Paragraph::new(hold_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Hold "),
-                );
+            let hold_panel = Paragraph::new(hold_lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(" Hold "),
+            );
             frame.render_widget(hold_panel, side_chunks[1]);
 
             // Footer
@@ -697,9 +800,15 @@ fn main() -> io::Result<()> {
                                 game.hard_drop();
                             }
                         }
-                        KeyCode::Left | KeyCode::Char('h') => { game.move_piece(-1, 0); }
-                        KeyCode::Right | KeyCode::Char('l') => { game.move_piece(1, 0); }
-                        KeyCode::Down | KeyCode::Char('j') => { game.move_piece(0, 1); }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            game.move_piece(-1, 0);
+                        }
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            game.move_piece(1, 0);
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            game.move_piece(0, 1);
+                        }
                         KeyCode::Up | KeyCode::Char('k') => game.rotate(true),
                         KeyCode::Char('z') => game.rotate(false),
                         KeyCode::Char('c') => game.hold_piece(),
