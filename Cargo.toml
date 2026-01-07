@@ -1,0 +1,12 @@
+[package]
+name = "textris"
+version = "0.1.0"
+edition = "2021"
+authors = ["Trent Brew"]
+description = "A terminal-based Tetris clone written in Rust"
+
+[dependencies]
+ratatui = "0.30.0"
+crossterm = "0.28"
+rodio = "0.19"
+fastrand = "2.1"
