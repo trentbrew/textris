@@ -553,9 +553,9 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     // Determine board size based on terminal height
-    // Reserve space for header (3) and footer (2) and some padding
+    // Board height should be about 75% of the window height
     let terminal_height = terminal.size()?.height - 1;
-    let board_height = (terminal_height as usize).saturating_sub(6).max(20);
+    let board_height = ((terminal_height as f32 * 0.75) as usize).max(20);
     // Keep standard width for gameplay balance, but could be adjusted
     let board_width = 11;
 
@@ -629,7 +629,17 @@ fn main() -> io::Result<()> {
             .block(Block::default().borders(Borders::BOTTOM));
             frame.render_widget(header, main_chunks[0]);
 
-            // Game area
+            // Game area - split vertically to ensure board height matches content
+            // Board needs game.height + 2 (top and bottom borders)
+            let board_widget_height = game.height as u16 + 2;
+            let game_vertical_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(board_widget_height),
+                    Constraint::Min(0),
+                ])
+                .split(main_chunks[1]);
+
             let game_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -638,7 +648,7 @@ fn main() -> io::Result<()> {
                     Constraint::Length(12),
                     Constraint::Fill(1),
                 ])
-                .split(main_chunks[1]);
+                .split(game_vertical_chunks[0]);
 
             // Board
             let mut board_lines: Vec<Line> = Vec::new();
